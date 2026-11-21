@@ -16,10 +16,12 @@ class Settings:
     CALIBER_MCP_URL: str = os.getenv("CALIBER_MCP_URL", "https://api.caliberstrong.com/mcp")
     CALIBER_CLIENT_ID: str = os.getenv("CALIBER_CLIENT_ID", "caliber-mcp")
     CALIBER_TOKEN_URL: str = os.getenv(
-        "CALIBER_TOKEN_URL", "https://api.caliberstrong.com/oauth/token"
+        "CALIBER_TOKEN_URL",
+        "https://id.caliberstrong.com/realms/caliber/protocol/openid-connect/token",
     )
     CALIBER_AUTH_URL: str = os.getenv(
-        "CALIBER_AUTH_URL", "https://api.caliberstrong.com/oauth/authorize"
+        "CALIBER_AUTH_URL",
+        "https://id.caliberstrong.com/realms/caliber/protocol/openid-connect/auth",
     )
 
     # Garmin Configuration

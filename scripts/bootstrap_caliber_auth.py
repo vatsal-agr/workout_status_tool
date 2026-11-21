@@ -13,9 +13,9 @@ import urllib.parse
 import httpx
 
 DEFAULT_CLIENT_ID = "caliber-mcp"
-DEFAULT_AUTH_URL = "https://api.caliberstrong.com/oauth/authorize"
-DEFAULT_TOKEN_URL = "https://api.caliberstrong.com/oauth/token"
-REDIRECT_URI = "urn:ietf:wg:oauth:2.0:oob"
+DEFAULT_AUTH_URL = "https://id.caliberstrong.com/realms/caliber/protocol/openid-connect/auth"
+DEFAULT_TOKEN_URL = "https://id.caliberstrong.com/realms/caliber/protocol/openid-connect/token"
+REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback"
 
 
 def generate_code_verifier(length: int = 64) -> str:
@@ -50,7 +50,7 @@ def main():
         "redirect_uri": REDIRECT_URI,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
-        "scope": "offline_access read:workouts read:nutrition read:stats",
+        "scope": "openid offline_access",
     }
     full_auth_url = f"{auth_url}?{urllib.parse.urlencode(params)}"
 
