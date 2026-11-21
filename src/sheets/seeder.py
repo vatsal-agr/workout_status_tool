@@ -9,29 +9,29 @@ from src.sheets.client import GoogleSheetsService
 logger = logging.getLogger(__name__)
 
 DEFAULT_PHILOSOPHY_RULES = [
-    ["### GENERAL TRAINING PHILOSOPHY & AUTOREGULATION GOVERNANCE", ""],
-    ["1. Intensity & RIR Targets", "Compound lifts: 1-2 RIR (never train to technical failure). Isolations: 0-1 RIR."],
-    ["2. Set Structure", "Top-Set + 1 Back-off Set. Top set targets heavy progression; back-off set drops load by 10% and targets +2 reps."],
-    ["3. Progression Model", "Double progression. Stay at the same weight until all working sets hit the top of the target rep range, then increment by the minimum equipment jump."],
-    ["4. Stall-Breaker Rule", "If consecutive_stalls >= 2, drop working weight by 10% for a volume reset, or swap to alternate grip/stance."],
-    ["5. Biometric Readiness Tiers", ""],
-    ["   - GREEN", "Full intensity and prescribed volume. Aggressively push top-set progression."],
-    ["   - AMBER", "Autoregulate. Maintain top-set load, drop back-off set, maintain strict 2 RIR."],
-    ["   - RED", "Fatigue alert. Deload session (-20% load, 1-2 sets @ 3-4 RIR) or take an active recovery day."],
-    ["   - PENDING_WATCH_SYNC", "No autonomic data yet. Execute scheduled session at standard progression without biometric gating."],
-    ["6. Nutrition Guardrails", "If yesterday's protein < target - 20g, prioritize high-protein morning meal before lifting."],
+    ["### DR. MIKE ISRAETEL HYPERTROPHY & AUTOREGULATION GOVERNANCE (RP STRENGTH)", ""],
+    ["1. Standardized Technique & Tempo", "Every single rep: 2-3 second controlled eccentric. 1-second dead-stop pause in the deepest stretched position. Zero bouncing, zero body english. If form degrades, the set is officially OVER."],
+    ["2. Proximity to Failure (RIR)", "Compounds: 1-2 RIR (1-2 reps shy of technical failure). Isolations: 0-1 RIR. Never train to catastrophic technical breakdown."],
+    ["3. Set Architecture & SFR", "Top-Set + 1 Back-off Set. Maximize Stimulus-to-Fatigue Ratio (SFR). Top set takes you to heavy standardized load; back-off set drops load by 10% for high-SFR rep accumulation."],
+    ["4. Dynamic Progression Model", "Double Progression. Maintain load until all sets hit the top rep ceiling with pristine eccentric control. Only then micro-load by the minimum equipment increment."],
+    ["5. Fatigue Management & Deloads", "If consecutive_stalls >= 2: Systemic fatigue has outpaced recovery. Trigger an immediate reactive deload (-20% load, 50% set volume, 3-4 RIR) to clear fatigue."],
+    ["6. 24/7 Wearable Autonomic Gating (Garmin)", ""],
+    ["   - GREEN", "Autonomic nervous system (ANS) fully recovered. Push double progression and crush top sets."],
+    ["   - AMBER", "Elevated RHR or suppressed HRV. Hold loads flat; drop back-off set (1 working set only); keep strict 2 RIR."],
+    ["   - RED", "Systemic ANS crash or compounded fatigue. Prescribe active recovery walk or a half-volume pump deload at 3-4 RIR."],
+    ["   - PENDING_WATCH_SYNC", "Wearable sync pending. Train at standard scheduled baseline with strict Dr. Mike biomechanical tempo."],
 ]
 
 DEFAULT_EXERCISE_CONFIG = [
-    ["Exercise Name", "Min Jump (kg)", "Progression Model", "Equipment Type", "Primary Biomechanical Cue"],
-    ["Barbell Bench Press", "2.5", "Double (6-8 reps)", "Barbell", "Pack lats, drive heels into floor, slight touch below nipple line."],
-    ["Incline Dumbbell Press", "2.0", "Double (8-10 reps)", "Dumbbell", "Elbows tucked 45°, deep stretch at bottom, do not bang dumbbells at top."],
-    ["Barbell Back Squat", "2.5", "Double (5-7 reps)", "Barbell", "Brace core 360°, knees track with toes, control descent."],
-    ["Romanian Deadlift", "2.5", "Double (8-10 reps)", "Barbell", "Hips push straight back, soft knees, stop when hamstrings reach full stretch."],
-    ["Lat Pulldown", "5.0", "Double (8-12 reps)", "Cable / Stack", "Depress scapulae first, drive elbows toward back pockets."],
-    ["Barbell Overhead Press", "1.25", "Double (6-8 reps)", "Barbell", "Squeeze glutes and abs, clear chin, push head through at lockout."],
-    ["Cable Lateral Raise", "1.25", "Double (12-15 reps)", "Cable / Stack", "Lead with elbows, slight forward lean, pause briefly at peak."],
-    ["Standing Calf Raise", "5.0", "Double (10-12 reps)", "Machine", "2-second deep pause in full stretch, explode to balls of feet."],
+    ["Exercise Name", "Min Jump (kg)", "Progression Model", "Equipment Type", "Primary Biomechanical Cue (Dr. Mike RP Standard)"],
+    ["Barbell Bench Press", "2.5", "Double (6-8 reps)", "Barbell", "3s eccentric, 1s pause deep on chest, elbows 45°, pack scapulae into bench."],
+    ["Incline Dumbbell Press", "2.0", "Double (8-10 reps)", "Dumbbell", "Control eccentric down to deep pec stretch, 1s pause in stretch, press in slight inward arc without clacking."],
+    ["Barbell Back Squat", "2.5", "Double (5-7 reps)", "Barbell", "Brace 360°, sink hips deep below parallel into full quad stretch, 1s pause, explode up."],
+    ["Romanian Deadlift", "2.5", "Double (8-10 reps)", "Barbell", "Push hips straight back, soft knees, lower until hamstrings are tearing apart in full stretch, 1s pause."],
+    ["Lat Pulldown", "5.0", "Double (8-12 reps)", "Cable / Stack", "Full overhead lat stretch at top, pull elbows down and back to pockets, squeeze lats, 2s eccentric."],
+    ["Barbell Overhead Press", "1.25", "Double (6-8 reps)", "Barbell", "Glutes locked, abs braced, touch upper chest, full lockout overhead pushing head through window."],
+    ["Cable Lateral Raise", "1.25", "Double (12-15 reps)", "Cable / Stack", "Cables at wrist height, lead with side delts, pause at peak 45° angle, control 3s down."],
+    ["Standing Calf Raise", "5.0", "Double (10-12 reps)", "Machine", "3s eccentric down, 2s deep agonizing stretch at the bottom, drive to big toes."],
 ]
 
 

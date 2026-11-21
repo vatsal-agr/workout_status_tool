@@ -33,10 +33,12 @@ class SheetsDataWriter:
 
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-        # Extract nutrition yesterday
-        recent_nutr = caliber_data.nutrition_logs_7d[-1] if caliber_data.nutrition_logs_7d else None
-        target_nutr = caliber_data.nutrition_targets
+        # Extract wearable & movement telemetry
         recent_steps = caliber_data.step_logs_7d[-1].step_count if caliber_data.step_logs_7d else 0
+        cardio_count = len(garmin_data.cardio.activities_24h) if garmin_data.cardio else 0
+        deep_sleep = garmin_data.sleep.deep_sleep_hours if garmin_data.sleep else None
+        rem_sleep = garmin_data.sleep.rem_sleep_hours if garmin_data.sleep else None
+        body_battery = garmin_data.cardio.body_battery_peak if garmin_data.cardio else None
 
         rows: List[List[Any]] = [
             # Header Section
@@ -47,23 +49,29 @@ class SheetsDataWriter:
             ["readiness_rationale", readiness.reason, "", "", "", "", ""],
             ["", "", "", "", "", "", ""],
 
-            # Biometrics
-            ["### 2. BIOMETRIC RECOVERY (GARMIN)", "", "", "", "", "", ""],
+            # 24/7 Wearable Autonomic Telemetry
+            ["### 2. 24/7 AUTONOMIC RECOVERY & PHYSIOLOGICAL DASHBOARD (GARMIN)", "", "", "", "", "", ""],
             ["today_hrv_avg_ms", readiness.today_hrv_ms if readiness.today_hrv_ms is not None else "PENDING_SYNC", "", "", "", "", ""],
             ["hrv_7d_baseline_mean", readiness.hrv_7d_mean or "N/A", "", "", "", "", ""],
             ["hrv_7d_baseline_std", readiness.hrv_7d_std or "N/A", "", "", "", "", ""],
             ["sleep_duration_hours", readiness.today_sleep_hours if readiness.today_sleep_hours is not None else "PENDING_SYNC", "", "", "", "", ""],
+            ["deep_sleep_tissue_repair_hours", deep_sleep if deep_sleep is not None else "N/A", "", "", "", "", ""],
+            ["rem_sleep_neural_repair_hours", rem_sleep if rem_sleep is not None else "N/A", "", "", "", "", ""],
             ["resting_heart_rate_bpm", readiness.today_rhr_bpm if readiness.today_rhr_bpm is not None else "N/A", "", "", "", "", ""],
+            ["rhr_7d_baseline_mean", readiness.rhr_7d_mean or "N/A", "", "", "", "", ""],
+            ["body_battery_peak", body_battery if body_battery is not None else "N/A", "", "", "", "", ""],
             ["garmin_sync_status", "SYNCED" if garmin_data.is_synced else "PENDING_WATCH_SYNC", "", "", "", "", ""],
             ["", "", "", "", "", "", ""],
 
-            # Nutrition & Lifestyle
-            ["### 3. NUTRITION & DAILY ACTIVITY (CALIBER)", "", "", "", "", "", ""],
-            ["yesterday_calories", recent_nutr.calories if recent_nutr else "N/A", "", "", "", "", ""],
-            ["calorie_target", target_nutr.calorie_target if target_nutr else "N/A", "", "", "", "", ""],
-            ["yesterday_protein_g", recent_nutr.protein_g if recent_nutr else "N/A", "", "", "", "", ""],
-            ["protein_target_g", target_nutr.protein_target_g if target_nutr else "N/A", "", "", "", "", ""],
-            ["yesterday_steps", recent_steps, "", "", "", "", ""],
+            # Wearable Movement & Situational Strain
+            ["### 3. WEARABLE STRAIN & 24/7 SITUATIONAL CONTEXT (GARMIN & CALIBER)", "", "", "", "", "", ""],
+            ["yesterday_step_count", recent_steps, "", "", "", "", ""],
+            ["yesterday_cardio_sessions_logged", cardio_count, "", "", "", "", ""],
+            ["systemic_wearable_strain_call", (
+                "High NEAT/step volume - monitor lower back/legs fatigue" if recent_steps > 12000
+                else "Moderate activity - good recovery environment" if recent_steps >= 6000
+                else "Low physical activity - low fatigue expenditure"
+            ), "", "", "", "", ""],
             ["", "", "", "", "", "", ""],
 
             # Rolling Split Target

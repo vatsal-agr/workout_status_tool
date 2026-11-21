@@ -69,8 +69,8 @@ def test_briefing_context_structure_and_compactness():
     # Verify key sections exist
     flat_text = " ".join([str(cell) for row in written_rows for cell in row])
     assert "SYSTEM METADATA & STATUS" in flat_text
-    assert "BIOMETRIC RECOVERY (GARMIN)" in flat_text
-    assert "NUTRITION & DAILY ACTIVITY (CALIBER)" in flat_text
+    assert "24/7 AUTONOMIC RECOVERY & PHYSIOLOGICAL DASHBOARD (GARMIN)" in flat_text
+    assert "WEARABLE STRAIN & 24/7 SITUATIONAL CONTEXT (GARMIN & CALIBER)" in flat_text
     assert "TODAY'S TARGET SPLIT" in flat_text
     assert "EXERCISE PROGRESSION & STALL MATRIX" in flat_text
     assert "Barbell Bench Press" in flat_text
