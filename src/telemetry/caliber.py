@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 import httpx
@@ -34,13 +35,12 @@ def _normalize_payload(raw: Any) -> Any:
         try:
             return json.loads(trimmed)
         except json.JSONDecodeError:
-            logger.info("MCP tool returned non-JSON text: %s", trimmed[:150])
-            return {}
+            return trimmed
     return {}
 
 
 def _extract_list(raw: Any, fallback_key: str) -> List[Any]:
-    """Extract a list from raw tool output safely, regardless of return format."""
+    """Extract a list from raw tool output safely."""
     normalized = _normalize_payload(raw)
     if isinstance(normalized, list):
         return normalized
@@ -48,6 +48,9 @@ def _extract_list(raw: Any, fallback_key: str) -> List[Any]:
         val = normalized.get(fallback_key, [])
         if isinstance(val, list):
             return val
+        for k, v in normalized.items():
+            if isinstance(v, list):
+                return v
     return []
 
 
@@ -57,6 +60,30 @@ def _extract_dict(raw: Any) -> Optional[Dict[str, Any]]:
     if isinstance(normalized, dict) and normalized:
         return normalized
     return None
+
+
+def _parse_text_workout_fallback(text: str) -> List[LoggedWorkout]:
+    """If MCP returns natural language / markdown for workouts, extract structured workout entries."""
+    workouts = []
+    lines = text.splitlines()
+    for line in lines:
+        line_clean = line.strip().lstrip("#*- ")
+        if not line_clean:
+            continue
+        date_match = re.search(r"\b(202\d-\d{2}-\d{2})\b", line_clean)
+        if date_match or any(k in line_clean.lower() for k in ("workout", "completed", "session", "chest", "legs", "back", "push", "pull")):
+            workout_date = datetime.strptime(date_match.group(1), "%Y-%m-%d") if date_match else datetime.now()
+            name_part = line_clean.split(":")[0] if ":" in line_clean else line_clean
+            workouts.append(
+                LoggedWorkout(
+                    workout_id=f"parsed_{len(workouts) + 1}",
+                    template_id=None,
+                    name=name_part[:50],
+                    completed_at=workout_date,
+                    exercises=[],
+                )
+            )
+    return workouts
 
 
 class CaliberMCPClient:
@@ -144,12 +171,26 @@ class CaliberMCPClient:
         self._initialized = True
         logger.info("MCP session initialization complete.")
 
+        # Discover and log all available tools & schemas
+        try:
+            tools_payload = {
+                "jsonrpc": "2.0",
+                "method": "tools/list",
+                "id": self._next_id(),
+            }
+            tools_res = self._send_rpc(tools_payload)
+            tools = tools_res.get("result", {}).get("tools", [])
+            tool_names = [t.get("name") for t in tools]
+            logger.info("Caliber MCP available tools: %s", tool_names)
+        except Exception as e:
+            logger.warning("Could not query tools/list: %s", e)
+
     def _send_rpc(self, payload: Dict[str, Any]) -> Any:
         """Send a JSON-RPC request to the MCP HTTP endpoint."""
         headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Accept": "application/json, text/event-stream",
         }
 
         with httpx.Client(timeout=25.0) as client:
@@ -162,11 +203,27 @@ class CaliberMCPClient:
                 )
                 response.raise_for_status()
 
-            if response.status_code == 200 and response.headers.get("content-type", "").startswith("application/json"):
+            if response.status_code in (200, 202):
+                content_type = response.headers.get("content-type", "")
+                if "application/json" in content_type:
+                    try:
+                        return response.json()
+                    except json.JSONDecodeError:
+                        pass
+
+                text = response.text
+                if "data:" in text:
+                    for line in text.splitlines():
+                        if line.startswith("data:"):
+                            try:
+                                return json.loads(line[5:].strip())
+                            except json.JSONDecodeError:
+                                pass
+
                 try:
-                    return response.json()
-                except json.JSONDecodeError:
-                    return {}
+                    return json.loads(text)
+                except Exception:
+                    return {"result": text}
 
             return {}
 
@@ -198,29 +255,51 @@ class CaliberMCPClient:
             first_item = tool_result["content"][0]
             if first_item.get("type") == "text":
                 text_content = first_item.get("text", "")
+                logger.info("Tool '%s' raw output preview: %s", tool_name, text_content[:250])
                 try:
                     return json.loads(text_content)
                 except json.JSONDecodeError:
                     return text_content
-        return tool_result.get("data", tool_result)
+
+        res_data = tool_result.get("data", tool_result)
+        logger.info("Tool '%s' returned: %s", tool_name, str(res_data)[:250])
+        return res_data
 
     def get_workout_plans(self) -> List[WorkoutPlanTemplate]:
         """Fetch active workout plan template sequence."""
         raw = self._call_tool("getWorkoutPlans")
         templates_data = _extract_list(raw, "templates")
-        return [WorkoutPlanTemplate.model_validate(t) for t in templates_data]
+        templates = []
+        for t in templates_data:
+            if isinstance(t, dict):
+                templates.append(WorkoutPlanTemplate.model_validate(t))
+        return templates
 
     def get_workouts(self, start_date: date, end_date: date) -> List[LoggedWorkout]:
         """Fetch completed workouts within the specified date window."""
+        # Include timezone padding (+1 day) to ensure evening workouts are captured
         raw = self._call_tool(
             "getWorkouts",
             {
                 "startDate": start_date.isoformat(),
-                "endDate": end_date.isoformat(),
+                "endDate": (end_date + timedelta(days=1)).isoformat(),
             },
         )
         workouts_data = _extract_list(raw, "workouts")
-        return [LoggedWorkout.model_validate(w) for w in workouts_data]
+
+        workouts: List[LoggedWorkout] = []
+        if workouts_data:
+            for w in workouts_data:
+                if isinstance(w, dict):
+                    try:
+                        workouts.append(LoggedWorkout.model_validate(w))
+                    except Exception as e:
+                        logger.warning("Could not validate workout dict: %s", e)
+        elif isinstance(raw, str) and raw.strip():
+            logger.info("getWorkouts returned text. Parsing fallback workouts: %s", raw[:200])
+            workouts = _parse_text_workout_fallback(raw)
+
+        return workouts
 
     def get_exercise_sessions(
         self, exercise_id: str, limit: int = 3
@@ -231,7 +310,14 @@ class CaliberMCPClient:
             {"exerciseId": exercise_id, "limit": limit},
         )
         sessions_data = _extract_list(raw, "sessions")
-        return [ExerciseSession.model_validate(s) for s in sessions_data]
+        sessions = []
+        for s in sessions_data:
+            if isinstance(s, dict):
+                try:
+                    sessions.append(ExerciseSession.model_validate(s))
+                except Exception as e:
+                    logger.warning("Could not validate session dict: %s", e)
+        return sessions
 
     def get_nutrition(self, start_date: date, end_date: date) -> List[NutritionSummary]:
         """Fetch daily nutrition summaries."""
@@ -239,11 +325,18 @@ class CaliberMCPClient:
             "getNutrition",
             {
                 "startDate": start_date.isoformat(),
-                "endDate": end_date.isoformat(),
+                "endDate": (end_date + timedelta(days=1)).isoformat(),
             },
         )
         nutrition_data = _extract_list(raw, "logs")
-        return [NutritionSummary.model_validate(n) for n in nutrition_data]
+        logs = []
+        for n in nutrition_data:
+            if isinstance(n, dict):
+                try:
+                    logs.append(NutritionSummary.model_validate(n))
+                except Exception as e:
+                    logger.warning("Could not validate nutrition log: %s", e)
+        return logs
 
     def get_nutrition_targets(self) -> Optional[NutritionTargets]:
         """Fetch daily macro targets."""
@@ -251,7 +344,10 @@ class CaliberMCPClient:
         data = _extract_dict(raw)
         if not data:
             return None
-        return NutritionTargets.model_validate(data)
+        try:
+            return NutritionTargets.model_validate(data)
+        except Exception:
+            return None
 
     def get_steps(self, start_date: date, end_date: date) -> List[DailySteps]:
         """Fetch daily step counts."""
@@ -259,11 +355,18 @@ class CaliberMCPClient:
             "getSteps",
             {
                 "startDate": start_date.isoformat(),
-                "endDate": end_date.isoformat(),
+                "endDate": (end_date + timedelta(days=1)).isoformat(),
             },
         )
         steps_data = _extract_list(raw, "steps")
-        return [DailySteps.model_validate(s) for s in steps_data]
+        steps = []
+        for s in steps_data:
+            if isinstance(s, dict):
+                try:
+                    steps.append(DailySteps.model_validate(s))
+                except Exception as e:
+                    logger.warning("Could not validate step entry: %s", e)
+        return steps
 
     def get_body_stats(self, start_date: date, end_date: date) -> List[BodyStat]:
         """Fetch daily body stats."""
@@ -271,11 +374,18 @@ class CaliberMCPClient:
             "getBodyStats",
             {
                 "startDate": start_date.isoformat(),
-                "endDate": end_date.isoformat(),
+                "endDate": (end_date + timedelta(days=1)).isoformat(),
             },
         )
         stats_data = _extract_list(raw, "stats")
-        return [BodyStat.model_validate(b) for b in stats_data]
+        stats = []
+        for b in stats_data:
+            if isinstance(b, dict):
+                try:
+                    stats.append(BodyStat.model_validate(b))
+                except Exception as e:
+                    logger.warning("Could not validate body stat entry: %s", e)
+        return stats
 
     def fetch_all_telemetry(self, reference_date: Optional[date] = None) -> CaliberTelemetry:
         """Fetch full telemetry payload needed for pipeline processing."""
