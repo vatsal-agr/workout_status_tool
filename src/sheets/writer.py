@@ -80,6 +80,7 @@ class SheetsDataWriter:
             ["split_cycle_position", f"{split_state.current_index + 1} of {split_state.total_templates}", "", "", "", "", ""],
             ["days_since_last_workout", split_state.days_since_last_workout if split_state.days_since_last_workout is not None else "N/A", "", "", "", "", ""],
             ["days_since_same_split", split_state.days_since_same_split if split_state.days_since_same_split is not None else "N/A", "", "", "", "", ""],
+            ["chest_exercise_alternation", split_state.alternation_notes or "N/A", "", "", "", "", ""],
             ["unplanned_fatigue_count", len(split_state.unplanned_fatigue_events), "", "", "", "", ""],
             ["unplanned_events_summary", "; ".join([e.name for e in split_state.unplanned_fatigue_events]) or "None", "", "", "", "", ""],
             ["", "", "", "", "", "", ""],
