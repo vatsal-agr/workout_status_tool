@@ -1,10 +1,7 @@
-"""Caliber MCP Client over HTTP/SSE with OAuth 2.0 Token Refresh."""
+"""Caliber MCP Client over HTTP with OAuth 2.0 Token Refresh."""
 
 import json
 import logging
-import queue
-import threading
-import urllib.parse
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 import httpx
@@ -24,8 +21,46 @@ from src.telemetry.models import (
 logger = logging.getLogger(__name__)
 
 
+def _normalize_payload(raw: Any) -> Any:
+    """Normalize raw tool output into dict, list, or empty structure."""
+    if raw is None:
+        return {}
+    if isinstance(raw, (dict, list)):
+        return raw
+    if isinstance(raw, str):
+        trimmed = raw.strip()
+        if not trimmed:
+            return {}
+        try:
+            return json.loads(trimmed)
+        except json.JSONDecodeError:
+            logger.info("MCP tool returned non-JSON text: %s", trimmed[:150])
+            return {}
+    return {}
+
+
+def _extract_list(raw: Any, fallback_key: str) -> List[Any]:
+    """Extract a list from raw tool output safely, regardless of return format."""
+    normalized = _normalize_payload(raw)
+    if isinstance(normalized, list):
+        return normalized
+    if isinstance(normalized, dict):
+        val = normalized.get(fallback_key, [])
+        if isinstance(val, list):
+            return val
+    return []
+
+
+def _extract_dict(raw: Any) -> Optional[Dict[str, Any]]:
+    """Extract a dict from raw tool output safely."""
+    normalized = _normalize_payload(raw)
+    if isinstance(normalized, dict) and normalized:
+        return normalized
+    return None
+
+
 class CaliberMCPClient:
-    """Client for Caliber MCP Server supporting both SSE and Streamable HTTP transports with OAuth 2.0 PKCE."""
+    """Client for Caliber MCP Server with Streamable HTTP JSON-RPC 2.0 and OAuth 2.0 PKCE."""
 
     def __init__(
         self,
@@ -41,15 +76,7 @@ class CaliberMCPClient:
         self.access_token: Optional[str] = None
         self.new_refresh_token: Optional[str] = None
 
-        # SSE and Session State
-        self.message_endpoint: Optional[str] = None
-        self._sse_client: Optional[httpx.Client] = None
-        self._sse_thread: Optional[threading.Thread] = None
-        self._sse_stop_event = threading.Event()
         self._msg_counter = 0
-        self._msg_lock = threading.Lock()
-        self._responses: Dict[int, Any] = {}
-        self._condition = threading.Condition()
         self._initialized = False
 
     def refresh_access_token(self) -> Tuple[str, str]:
@@ -79,84 +106,17 @@ class CaliberMCPClient:
         return self.access_token, self.new_refresh_token
 
     def _next_id(self) -> int:
-        with self._msg_lock:
-            self._msg_counter += 1
-            return self._msg_counter
-
-    def _sse_listener_worker(self, endpoint_queue: queue.Queue):
-        """Background worker listening on the SSE event stream."""
-        headers = {
-            "Authorization": f"Bearer {self.access_token}",
-            "Accept": "text/event-stream",
-        }
-        try:
-            with httpx.Client(timeout=httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)) as sse_client:
-                self._sse_client = sse_client
-                with sse_client.stream("GET", self.mcp_url, headers=headers) as response:
-                    if response.status_code != 200:
-                        logger.error("SSE stream connection rejected [%d]: %s", response.status_code, response.text)
-                        endpoint_queue.put(None)
-                        return
-
-                    current_event: Optional[str] = None
-                    for line in response.iter_lines():
-                        if self._sse_stop_event.is_set():
-                            break
-                        if not line:
-                            current_event = None
-                            continue
-                        if line.startswith("event:"):
-                            current_event = line[6:].strip()
-                        elif line.startswith("data:"):
-                            data_str = line[5:].strip()
-                            if current_event == "endpoint":
-                                full_endpoint = urllib.parse.urljoin(self.mcp_url, data_str)
-                                endpoint_queue.put(full_endpoint)
-                            elif current_event == "message" or data_str.startswith("{"):
-                                try:
-                                    parsed = json.loads(data_str)
-                                    msg_id = parsed.get("id")
-                                    if msg_id is not None:
-                                        with self._condition:
-                                            self._responses[msg_id] = parsed
-                                            self._condition.notify_all()
-                                except json.JSONDecodeError:
-                                    pass
-        except Exception as e:
-            if not self._sse_stop_event.is_set():
-                logger.warning("SSE connection closed: %s", e)
-            endpoint_queue.put(None)
+        self._msg_counter += 1
+        return self._msg_counter
 
     def _ensure_session(self):
-        """Establish SSE session or initialize connection with the MCP server."""
-        if self._initialized and self.message_endpoint:
+        """Perform MCP initialize handshake via Streamable HTTP."""
+        if self._initialized:
             return
 
         if not self.access_token:
             self.refresh_access_token()
 
-        # Step 1: Attempt to establish SSE stream
-        endpoint_queue = queue.Queue()
-        self._sse_stop_event.clear()
-        self._sse_thread = threading.Thread(
-            target=self._sse_listener_worker,
-            args=(endpoint_queue,),
-            daemon=True,
-        )
-        self._sse_thread.start()
-
-        try:
-            self.message_endpoint = endpoint_queue.get(timeout=8.0)
-        except queue.Empty:
-            self.message_endpoint = None
-
-        if self.message_endpoint:
-            logger.info("Established MCP SSE transport. Message endpoint: %s", self.message_endpoint)
-        else:
-            logger.info("SSE endpoint not provided; falling back to direct HTTP POST on %s", self.mcp_url)
-            self.message_endpoint = self.mcp_url
-
-        # Step 2: Send MCP 'initialize' handshake
         init_id = self._next_id()
         init_payload = {
             "jsonrpc": "2.0",
@@ -173,59 +133,42 @@ class CaliberMCPClient:
         }
 
         logger.info("Sending MCP initialize handshake...")
-        self._send_rpc(init_payload, expect_id=init_id)
+        self._send_rpc(init_payload)
 
-        # Step 3: Send 'notifications/initialized'
+        # Confirm initialization notification
         notif_payload = {
             "jsonrpc": "2.0",
             "method": "notifications/initialized",
         }
-        self._send_rpc(notif_payload, expect_id=None)
+        self._send_rpc(notif_payload)
         self._initialized = True
         logger.info("MCP session initialization complete.")
 
-    def _send_rpc(self, payload: Dict[str, Any], expect_id: Optional[int] = None) -> Any:
-        """Send a JSON-RPC request to the message endpoint and await response (via HTTP or SSE)."""
+    def _send_rpc(self, payload: Dict[str, Any]) -> Any:
+        """Send a JSON-RPC request to the MCP HTTP endpoint."""
         headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
+            "Accept": "application/json",
         }
-        target_url = self.message_endpoint or self.mcp_url
 
         with httpx.Client(timeout=25.0) as client:
-            response = client.post(target_url, json=payload, headers=headers)
+            response = client.post(self.mcp_url, json=payload, headers=headers)
             if response.status_code >= 400:
                 logger.error(
-                    "MCP POST to %s failed [%d]: %s",
-                    target_url,
+                    "MCP POST failed [%d]: %s",
                     response.status_code,
                     response.text,
                 )
                 response.raise_for_status()
 
-            # Case A: Server returned JSON-RPC response directly in POST response body
             if response.status_code == 200 and response.headers.get("content-type", "").startswith("application/json"):
                 try:
-                    result = response.json()
-                    if expect_id is not None and result.get("id") == expect_id:
-                        return result
-                    elif expect_id is None:
-                        return result
+                    return response.json()
                 except json.JSONDecodeError:
-                    pass
+                    return {}
 
-        # Case B: Server sends response asynchronously over the SSE stream
-        if expect_id is not None:
-            with self._condition:
-                start_time = datetime.now()
-                while expect_id not in self._responses:
-                    if (datetime.now() - start_time).total_seconds() > 20.0:
-                        raise TimeoutError(f"Timed out waiting for MCP response id={expect_id}")
-                    self._condition.wait(timeout=1.0)
-                return self._responses.pop(expect_id)
-
-        return None
+            return {}
 
     def _call_tool(self, tool_name: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
         """Call a remote MCP tool using JSON-RPC 2.0 tools/call."""
@@ -242,7 +185,7 @@ class CaliberMCPClient:
             "id": req_id,
         }
 
-        raw_response = self._send_rpc(body, expect_id=req_id)
+        raw_response = self._send_rpc(body)
         if not raw_response:
             return {}
 
@@ -250,20 +193,21 @@ class CaliberMCPClient:
             raise RuntimeError(f"MCP Tool '{tool_name}' failed: {raw_response['error']}")
 
         tool_result = raw_response.get("result", {})
-        # MCP format: {"content": [{"type": "text", "text": "..."}]} or direct data
-        if "content" in tool_result and isinstance(tool_result["content"], list):
+        # Extract content from MCP format: {"content": [{"type": "text", "text": "..."}]}
+        if "content" in tool_result and isinstance(tool_result["content"], list) and len(tool_result["content"]) > 0:
             first_item = tool_result["content"][0]
             if first_item.get("type") == "text":
+                text_content = first_item.get("text", "")
                 try:
-                    return json.loads(first_item.get("text", "{}"))
+                    return json.loads(text_content)
                 except json.JSONDecodeError:
-                    return first_item.get("text")
+                    return text_content
         return tool_result.get("data", tool_result)
 
     def get_workout_plans(self) -> List[WorkoutPlanTemplate]:
         """Fetch active workout plan template sequence."""
         raw = self._call_tool("getWorkoutPlans")
-        templates_data = raw if isinstance(raw, list) else raw.get("templates", [])
+        templates_data = _extract_list(raw, "templates")
         return [WorkoutPlanTemplate.model_validate(t) for t in templates_data]
 
     def get_workouts(self, start_date: date, end_date: date) -> List[LoggedWorkout]:
@@ -275,7 +219,7 @@ class CaliberMCPClient:
                 "endDate": end_date.isoformat(),
             },
         )
-        workouts_data = raw if isinstance(raw, list) else raw.get("workouts", [])
+        workouts_data = _extract_list(raw, "workouts")
         return [LoggedWorkout.model_validate(w) for w in workouts_data]
 
     def get_exercise_sessions(
@@ -286,7 +230,7 @@ class CaliberMCPClient:
             "getExerciseSessions",
             {"exerciseId": exercise_id, "limit": limit},
         )
-        sessions_data = raw if isinstance(raw, list) else raw.get("sessions", [])
+        sessions_data = _extract_list(raw, "sessions")
         return [ExerciseSession.model_validate(s) for s in sessions_data]
 
     def get_nutrition(self, start_date: date, end_date: date) -> List[NutritionSummary]:
@@ -298,15 +242,16 @@ class CaliberMCPClient:
                 "endDate": end_date.isoformat(),
             },
         )
-        nutrition_data = raw if isinstance(raw, list) else raw.get("logs", [])
+        nutrition_data = _extract_list(raw, "logs")
         return [NutritionSummary.model_validate(n) for n in nutrition_data]
 
     def get_nutrition_targets(self) -> Optional[NutritionTargets]:
         """Fetch daily macro targets."""
         raw = self._call_tool("getNutritionTargets")
-        if not raw:
+        data = _extract_dict(raw)
+        if not data:
             return None
-        return NutritionTargets.model_validate(raw)
+        return NutritionTargets.model_validate(data)
 
     def get_steps(self, start_date: date, end_date: date) -> List[DailySteps]:
         """Fetch daily step counts."""
@@ -317,7 +262,7 @@ class CaliberMCPClient:
                 "endDate": end_date.isoformat(),
             },
         )
-        steps_data = raw if isinstance(raw, list) else raw.get("steps", [])
+        steps_data = _extract_list(raw, "steps")
         return [DailySteps.model_validate(s) for s in steps_data]
 
     def get_body_stats(self, start_date: date, end_date: date) -> List[BodyStat]:
@@ -329,7 +274,7 @@ class CaliberMCPClient:
                 "endDate": end_date.isoformat(),
             },
         )
-        stats_data = raw if isinstance(raw, list) else raw.get("stats", [])
+        stats_data = _extract_list(raw, "stats")
         return [BodyStat.model_validate(b) for b in stats_data]
 
     def fetch_all_telemetry(self, reference_date: Optional[date] = None) -> CaliberTelemetry:
@@ -368,10 +313,5 @@ class CaliberMCPClient:
         )
 
     def close(self):
-        """Clean up SSE background thread and clients."""
-        self._sse_stop_event.set()
-        if self._sse_client:
-            try:
-                self._sse_client.close()
-            except Exception:
-                pass
+        """Cleanup handler (no-op for stateless HTTP)."""
+        pass

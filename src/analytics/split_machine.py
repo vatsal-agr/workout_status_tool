@@ -42,11 +42,19 @@ def calculate_rolling_split(
     5. Next workout is W_{(k + 1) % n}.
     6. Compute days_since_last_workout and days_since_same_split.
     """
-    if not templates:
-        raise ValueError("Cannot calculate split without active workout plan templates.")
-
     ref_date = reference_date or date.today()
-    ordered_templates = sorted(templates, key=lambda t: t.order_index)
+    if not templates:
+        ordered_templates = [
+            WorkoutPlanTemplate(
+                template_id="default_routine",
+                name="Default Strength Rotation",
+                order_index=0,
+                exercise_ids=[],
+                exercise_names=["Compound Lift A", "Compound Lift B"],
+            )
+        ]
+    else:
+        ordered_templates = sorted(templates, key=lambda t: t.order_index)
     n = len(ordered_templates)
     template_id_map = {t.template_id: idx for idx, t in enumerate(ordered_templates)}
 
