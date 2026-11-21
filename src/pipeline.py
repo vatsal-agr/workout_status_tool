@@ -42,6 +42,8 @@ def run_pipeline(reference_date: Optional[date] = None) -> bool:
     except Exception as e:
         logger.error("Failed to fetch Caliber telemetry: %s", e)
         raise
+    finally:
+        caliber_client.close()
 
     # 2. Garmin Ingestion
     logger.info("Step 2/6: Fetching Garmin Biometrics...")
