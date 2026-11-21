@@ -1,0 +1,24 @@
+# Virtual environment
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Environment and Secrets
+.env
+*.pem
+service_account.json
+credentials.json
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/

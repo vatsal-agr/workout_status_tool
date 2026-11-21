@@ -1,0 +1,15 @@
+# Core HTTP, Validation & Serialization
+httpx>=0.25.0
+pydantic>=2.5.0
+python-dotenv>=1.0.0
+
+# Google Sheets & GCP Service Account
+gspread>=5.12.0
+google-auth>=2.25.0
+
+# Security & Secret Rotation (GitHub Actions Public Key Encryption)
+pynacl>=1.5.0
+
+# Testing & Verification
+pytest>=7.4.0
+pytest-mock>=3.12.0
