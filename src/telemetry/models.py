@@ -84,8 +84,8 @@ class ExerciseSession(BaseModel):
         d = dict(data)
         d.setdefault("exerciseId", d.get("exercise_id", d.get("id", "ex_unknown")))
         d.setdefault("exerciseName", d.get("exercise_name", d.get("name", d.get("exerciseId", "Exercise"))))
-        if "performedAt" in d or "performed_at" in d or "date" in d or "completedAt" in d:
-            date_val = d.get("performedAt") or d.get("performed_at") or d.get("date") or d.get("completedAt")
+        if "performedAt" in d or "performed_at" in d or "date" in d or "completedAt" in d or "completionDate" in d:
+            date_val = d.get("performedAt") or d.get("performed_at") or d.get("date") or d.get("completedAt") or d.get("completionDate")
             d["performedAt"] = _parse_flexible_datetime(date_val)
         return d
 
@@ -264,9 +264,10 @@ class GarminSleep(BaseModel):
 
 
 class GarminCardio(BaseModel):
-    """Garmin resting heart rate, body battery, and recent strain."""
+    """Garmin resting heart rate, body battery, steps, and recent strain."""
     resting_heart_rate: Optional[int] = None
     body_battery_peak: Optional[int] = None
+    steps: Optional[int] = None
     activities_24h: List[Dict[str, Any]] = Field(default_factory=list)
 
 
@@ -276,6 +277,7 @@ class GarminDailyMetric(BaseModel):
     hrv_avg_ms: Optional[float] = None
     resting_heart_rate: Optional[int] = None
     sleep_total_hours: Optional[float] = None
+    steps: Optional[int] = None
 
 
 class GarminTelemetry(BaseModel):

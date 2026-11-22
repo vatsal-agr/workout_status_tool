@@ -83,9 +83,9 @@ def run_pipeline(reference_date: Optional[date] = None) -> bool:
     num_exercises = max(len(target_tpl.exercise_ids), len(target_tpl.exercise_names))
     for i in range(num_exercises):
         ex_id = target_tpl.exercise_ids[i] if i < len(target_tpl.exercise_ids) else f"ex_{i+1}"
-        ex_name = target_tpl.exercise_names[i] if i < len(target_tpl.exercise_names) else ex_id
+        ex_name = target_tpl.exercise_names[i] if (i < len(target_tpl.exercise_names) and target_tpl.exercise_names[i]) else ex_id
         sessions = caliber_data.recent_exercise_sessions.get(ex_id, [])
-        if sessions and sessions[0].exercise_name:
+        if (not ex_name or ex_name == ex_id) and sessions and sessions[0].exercise_name and sessions[0].exercise_name != "ex_unknown":
             ex_name = sessions[0].exercise_name
 
         metrics = compute_exercise_progression(

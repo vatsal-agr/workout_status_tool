@@ -34,7 +34,14 @@ class SheetsDataWriter:
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
         # Extract wearable & movement telemetry
-        recent_steps = caliber_data.step_logs_7d[-1].step_count if caliber_data.step_logs_7d else 0
+        garmin_yesterday_steps = None
+        if garmin_data.history_7d and garmin_data.history_7d[0].steps is not None:
+            garmin_yesterday_steps = garmin_data.history_7d[0].steps
+        elif garmin_data.cardio and garmin_data.cardio.steps is not None:
+            garmin_yesterday_steps = garmin_data.cardio.steps
+
+        caliber_steps = caliber_data.step_logs_7d[-1].step_count if caliber_data.step_logs_7d else 0
+        recent_steps = garmin_yesterday_steps if garmin_yesterday_steps is not None else caliber_steps
         cardio_count = len(garmin_data.cardio.activities_24h) if garmin_data.cardio else 0
         deep_sleep = garmin_data.sleep.deep_sleep_hours if garmin_data.sleep else None
         rem_sleep = garmin_data.sleep.rem_sleep_hours if garmin_data.sleep else None

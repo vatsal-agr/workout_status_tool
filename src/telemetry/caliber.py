@@ -379,8 +379,15 @@ class CaliberMCPClient:
 
         return out_args
 
-    def get_workout_plans(self) -> List[WorkoutPlanTemplate]:
-        """Fetch active workout plan template sequence."""
+    def get_workout_plans(
+        self, recent_workouts: Optional[List[LoggedWorkout]] = None
+    ) -> List[WorkoutPlanTemplate]:
+        """Fetch active workout plan template sequence.
+
+        When Caliber returns multiple plans (historical, copied, or archived), identify
+        and select the currently active plan matching recent workout titles or with the
+        highest sortOrder.
+        """
         raw = None
         try:
             raw = self._call_tool("getWorkoutPlans")
@@ -391,19 +398,49 @@ class CaliberMCPClient:
         templates = []
         # Case 1: Caliber nested plans format: {"plans": [{"workouts": [...]}]}
         if isinstance(raw, dict) and "plans" in raw and isinstance(raw["plans"], list):
-            for plan in raw["plans"]:
-                if isinstance(plan, dict):
-                    workouts = plan.get("workouts", [])
-                    if isinstance(workouts, list):
-                        for idx, w in enumerate(workouts):
-                            if isinstance(w, dict):
-                                try:
-                                    tpl = WorkoutPlanTemplate.model_validate(w)
-                                    if tpl.order_index == 0 and idx > 0:
-                                        tpl.order_index = idx
-                                    templates.append(tpl)
-                                except Exception as e:
-                                    logger.warning("Could not validate nested workout template: %s", e)
+            plans_list = [p for p in raw["plans"] if isinstance(p, dict)]
+            best_plan = None
+            max_matches = -1
+            recent_names = [w.name.lower() for w in recent_workouts] if recent_workouts else []
+
+            for plan in plans_list:
+                w_titles = [
+                    w.get("title", "").lower()
+                    for w in plan.get("workouts", [])
+                    if isinstance(w, dict)
+                ]
+                matches = sum(
+                    1 for rw in recent_names if any(rw == pw or pw in rw or rw in pw for pw in w_titles)
+                )
+                if matches > max_matches:
+                    max_matches = matches
+                    best_plan = plan
+
+            # If no recent workouts matched, select plan with highest sortOrder
+            if best_plan is None or max_matches == 0:
+                best_plan = max(
+                    plans_list,
+                    key=lambda p: p.get("sortOrder", 0),
+                    default=plans_list[-1] if plans_list else None,
+                )
+
+            if best_plan:
+                logger.info(
+                    "Selected active plan: '%s' (sortOrder=%s, matches=%d)",
+                    best_plan.get("title"),
+                    best_plan.get("sortOrder"),
+                    max_matches,
+                )
+                workouts = best_plan.get("workouts", [])
+                if isinstance(workouts, list):
+                    for idx, w in enumerate(workouts):
+                        if isinstance(w, dict):
+                            try:
+                                tpl = WorkoutPlanTemplate.model_validate(w)
+                                tpl.order_index = idx
+                                templates.append(tpl)
+                            except Exception as e:
+                                logger.warning("Could not validate nested workout template: %s", e)
 
         # Case 2: Direct list or {"templates": [...]}
         if not templates:
@@ -459,7 +496,11 @@ class CaliberMCPClient:
         return workouts
 
     def get_exercise_sessions(
-        self, exercise_id: str, start_date: Optional[date] = None, end_date: Optional[date] = None
+        self,
+        exercise_id: str,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        exercise_name: Optional[str] = None,
     ) -> List[ExerciseSession]:
         """Fetch historical sessions for a specific exercise UUID."""
         t_to = end_date or date.today()
@@ -480,6 +521,9 @@ class CaliberMCPClient:
         sessions = []
         for s in sessions_data:
             if isinstance(s, dict):
+                s.setdefault("exerciseId", str(exercise_id))
+                if exercise_name:
+                    s.setdefault("exerciseName", exercise_name)
                 try:
                     sessions.append(ExerciseSession.model_validate(s))
                 except Exception as e:
@@ -573,8 +617,8 @@ class CaliberMCPClient:
         start_14d = ref_date - timedelta(days=14)
         start_7d = ref_date - timedelta(days=7)
 
-        templates = self.get_workout_plans()
         workouts_14d = self.get_workouts(start_date=start_14d, end_date=ref_date)
+        templates = self.get_workout_plans(recent_workouts=workouts_14d)
         nutrition_7d = self.get_nutrition(start_date=start_7d, end_date=ref_date)
         targets = self.get_nutrition_targets()
         steps_7d = self.get_steps(start_date=start_7d, end_date=ref_date)
@@ -585,10 +629,17 @@ class CaliberMCPClient:
         distinct_exercise_ids = {
             ex_id for t in templates for ex_id in t.exercise_ids if ex_id
         }
+        exercise_id_to_name: Dict[str, str] = {}
+        for t in templates:
+            for eid, ename in zip(t.exercise_ids, t.exercise_names):
+                if eid and ename:
+                    exercise_id_to_name[eid] = ename
         for w in workouts_14d:
             for ex in w.exercises:
                 if ex.exercise_id:
                     distinct_exercise_ids.add(ex.exercise_id)
+                    if ex.exercise_name and ex.exercise_name != "ex_unknown":
+                        exercise_id_to_name[ex.exercise_id] = ex.exercise_name
 
         for ex_id in distinct_exercise_ids:
             try:
@@ -596,6 +647,7 @@ class CaliberMCPClient:
                     exercise_id=ex_id,
                     start_date=ref_date - timedelta(days=60),
                     end_date=ref_date,
+                    exercise_name=exercise_id_to_name.get(ex_id),
                 )
             except Exception as e:
                 logger.warning("Could not fetch sessions for exercise %s: %s", ex_id, e)

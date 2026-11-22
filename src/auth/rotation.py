@@ -20,8 +20,8 @@ class GitHubSecretRotator:
         repository: Optional[str] = None,
         pat: Optional[str] = None,
     ):
-        self.repository = repository or settings.GITHUB_REPOSITORY
-        self.pat = pat or settings.GH_PAT
+        self.repository = repository if repository is not None else settings.GITHUB_REPOSITORY
+        self.pat = pat if pat is not None else settings.GH_PAT
 
     def _get_headers(self) -> dict:
         if not self.pat:
