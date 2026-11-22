@@ -5,6 +5,35 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
+import re
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional, Union
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+def _parse_flexible_datetime(val: Any) -> datetime:
+    """Parse string, integer timestamp, or datetime into a datetime object."""
+    if isinstance(val, datetime):
+        return val
+    if isinstance(val, (int, float)):
+        # Milliseconds vs seconds detection
+        if val > 1e11:
+            return datetime.fromtimestamp(val / 1000.0)
+        return datetime.fromtimestamp(val)
+    if isinstance(val, str):
+        val_clean = val.strip().replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(val_clean)
+        except Exception:
+            pass
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return datetime.strptime(val_clean.split("+")[0], fmt)
+            except Exception:
+                continue
+    return datetime.now()
+
+
 # --- Caliber Models ---
 
 class ExerciseSet(BaseModel):
@@ -17,6 +46,26 @@ class ExerciseSet(BaseModel):
     rir: Optional[float] = Field(default=None)  # Reps in Reserve
     is_warmup: bool = Field(default=False, alias="isWarmup")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        d = dict(data)
+        d.setdefault("setNumber", d.get("set_number", d.get("order", 1)))
+        # Weight conversion if lbs is provided
+        if "weightKg" not in d and "weight_kg" not in d:
+            if "weight" in d:
+                d["weightKg"] = float(d["weight"] or 0.0)
+            elif "weightLbs" in d or "weight_lbs" in d:
+                lbs = float(d.get("weightLbs") or d.get("weight_lbs") or 0.0)
+                d["weightKg"] = round(lbs * 0.453592, 2)
+            else:
+                d["weightKg"] = 0.0
+        d.setdefault("reps", d.get("repCount", d.get("repetitions", 0)))
+        d.setdefault("isWarmup", d.get("is_warmup", d.get("warmup", False)))
+        return d
+
 
 class ExerciseSession(BaseModel):
     """Historical or planned performance record of an exercise."""
@@ -26,6 +75,19 @@ class ExerciseSession(BaseModel):
     exercise_name: str = Field(..., alias="exerciseName")
     performed_at: Optional[datetime] = Field(default=None, alias="performedAt")
     sets: List[ExerciseSet] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        d = dict(data)
+        d.setdefault("exerciseId", d.get("exercise_id", d.get("id", "ex_unknown")))
+        d.setdefault("exerciseName", d.get("exercise_name", d.get("name", d.get("exerciseId", "Exercise"))))
+        if "performedAt" in d or "performed_at" in d or "date" in d or "completedAt" in d:
+            date_val = d.get("performedAt") or d.get("performed_at") or d.get("date") or d.get("completedAt")
+            d["performedAt"] = _parse_flexible_datetime(date_val)
+        return d
 
 
 class WorkoutPlanTemplate(BaseModel):
@@ -38,6 +100,40 @@ class WorkoutPlanTemplate(BaseModel):
     exercise_ids: List[str] = Field(default_factory=list, alias="exerciseIds")
     exercise_names: List[str] = Field(default_factory=list, alias="exerciseNames")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        d = dict(data)
+        tid = d.get("templateId") or d.get("template_id") or d.get("id") or d.get("planId") or d.get("workoutPlanId") or d.get("plan_id")
+        tname = d.get("name") or d.get("title") or d.get("planName") or d.get("workoutName") or "Plan"
+        d["templateId"] = str(tid or tname.lower().replace(" ", "_"))
+        d["name"] = str(tname)
+        d.setdefault("orderIndex", d.get("order_index", d.get("order", 0)))
+
+        # Extract nested exercises if present
+        ex_list = d.get("exercises") or d.get("items") or []
+        if isinstance(ex_list, list) and ex_list:
+            ids = []
+            names = []
+            for item in ex_list:
+                if isinstance(item, dict):
+                    eid = item.get("id") or item.get("exerciseId") or item.get("exercise_id") or item.get("name")
+                    ename = item.get("name") or item.get("exerciseName") or item.get("exercise_name") or str(eid)
+                    if eid:
+                        ids.append(str(eid))
+                    if ename:
+                        names.append(str(ename))
+                elif isinstance(item, str):
+                    ids.append(item)
+                    names.append(item)
+            if not d.get("exerciseIds") and not d.get("exercise_ids"):
+                d["exerciseIds"] = ids
+            if not d.get("exerciseNames") and not d.get("exercise_names"):
+                d["exerciseNames"] = names
+        return d
+
 
 class LoggedWorkout(BaseModel):
     """Historical completed workout session from Caliber."""
@@ -48,6 +144,23 @@ class LoggedWorkout(BaseModel):
     name: str = Field(...)
     completed_at: datetime = Field(..., alias="completedAt")
     exercises: List[ExerciseSession] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        d = dict(data)
+        wid = d.get("workoutId") or d.get("workout_id") or d.get("id") or f"workout_{datetime.now().timestamp()}"
+        tid = d.get("templateId") or d.get("template_id") or d.get("planId") or d.get("workoutPlanId") or d.get("plan_id")
+        wname = d.get("name") or d.get("title") or d.get("workoutName") or "Completed Workout"
+        date_raw = d.get("completedAt") or d.get("completed_at") or d.get("date") or d.get("completedDate") or d.get("timestamp") or datetime.now()
+
+        d["workoutId"] = str(wid)
+        d["templateId"] = str(tid) if tid else None
+        d["name"] = str(wname)
+        d["completedAt"] = _parse_flexible_datetime(date_raw)
+        return d
 
 
 class NutritionSummary(BaseModel):

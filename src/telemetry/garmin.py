@@ -33,9 +33,23 @@ class GarminPersonalAPIClient:
             raise ValueError(
                 "Garmin API Key missing. Please set GARMIN_PERSONAL_API_KEY in environment or secrets."
             )
+        auth_val = self.api_key.strip()
+        if not (auth_val.startswith("Bearer ") or auth_val.startswith("OAuth ")):
+            auth_val = f"Bearer {auth_val}"
         return {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": auth_val,
             "Accept": "application/json",
+        }
+
+    def _get_window_params(
+        self, target_date: date, window_days_back: int = 1, window_days_forward: int = 1
+    ) -> Dict[str, int]:
+        """Garmin Health API strictly requires both uploadStartTimeInSeconds and uploadEndTimeInSeconds."""
+        start_dt = datetime.combine(target_date - timedelta(days=window_days_back), datetime.min.time())
+        end_dt = datetime.combine(target_date + timedelta(days=window_days_forward), datetime.max.time())
+        return {
+            "uploadStartTimeInSeconds": int(start_dt.timestamp()),
+            "uploadEndTimeInSeconds": int(end_dt.timestamp()),
         }
 
     def _request(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Any:
@@ -44,6 +58,8 @@ class GarminPersonalAPIClient:
             response = client.get(url, headers=self._get_headers(), params=params or {})
             if response.status_code == 404:
                 return None
+            if response.status_code >= 400:
+                logger.warning("Garmin GET %s failed [%d]: %s", url, response.status_code, response.text[:250])
             response.raise_for_status()
             return response.json()
 
@@ -53,14 +69,13 @@ class GarminPersonalAPIClient:
         Handles unsynced watch condition gracefully.
         """
         try:
-            data = self._request(
-                "wellness-api/rest/hrv",
-                {"uploadStartTimeInSeconds": int(datetime.combine(target_date, datetime.min.time()).timestamp())},
-            )
+            params = self._get_window_params(target_date, window_days_back=1, window_days_forward=1)
+            data = self._request("wellness-api/rest/hrv", params)
             if not data or not isinstance(data, list) or len(data) == 0:
                 return GarminHRV(status="PENDING_WATCH_SYNC")
 
-            item = data[0]
+            target_str = target_date.isoformat()
+            item = next((d for d in data if d.get("calendarDate") == target_str), data[-1])
             last_night_avg = item.get("lastNightAvg") or item.get("hrvSummary", {}).get("weeklyAvg")
             status = item.get("status", "BALANCED") if last_night_avg else "PENDING_WATCH_SYNC"
 
@@ -76,14 +91,13 @@ class GarminPersonalAPIClient:
     def get_sleep_summary(self, target_date: date) -> GarminSleep:
         """Fetch sleep metrics for overnight leading into target date."""
         try:
-            data = self._request(
-                "wellness-api/rest/sleeps",
-                {"uploadStartTimeInSeconds": int(datetime.combine(target_date, datetime.min.time()).timestamp())},
-            )
+            params = self._get_window_params(target_date, window_days_back=1, window_days_forward=1)
+            data = self._request("wellness-api/rest/sleeps", params)
             if not data or not isinstance(data, list) or len(data) == 0:
                 return GarminSleep()
 
-            item = data[0]
+            target_str = target_date.isoformat()
+            item = next((d for d in data if d.get("calendarDate") == target_str), data[-1])
             sleep_duration_seconds = item.get("durationInSeconds", 0)
             deep_seconds = item.get("deepSleepDurationInSeconds", 0)
             rem_seconds = item.get("remSleepInSeconds", 0)
@@ -108,22 +122,19 @@ class GarminPersonalAPIClient:
         activities: List[Dict[str, Any]] = []
 
         try:
-            daily_data = self._request(
-                "wellness-api/rest/dailies",
-                {"uploadStartTimeInSeconds": int(datetime.combine(target_date, datetime.min.time()).timestamp())},
-            )
+            params = self._get_window_params(target_date, window_days_back=1, window_days_forward=1)
+            daily_data = self._request("wellness-api/rest/dailies", params)
             if daily_data and isinstance(daily_data, list) and len(daily_data) > 0:
-                day_item = daily_data[0]
+                target_str = target_date.isoformat()
+                day_item = next((d for d in daily_data if d.get("calendarDate") == target_str), daily_data[-1])
                 rhr = day_item.get("restingHeartRateInBeatsPerMinute")
                 body_battery = day_item.get("bodyBatteryHighestValue")
         except Exception as e:
             logger.warning("Could not fetch Garmin dailies for %s: %s", target_date, e)
 
         try:
-            act_data = self._request(
-                "activity-api/rest/activities",
-                {"uploadStartTimeInSeconds": int(datetime.combine(target_date - timedelta(days=1), datetime.min.time()).timestamp())},
-            )
+            act_params = self._get_window_params(target_date - timedelta(days=1), window_days_back=1, window_days_forward=1)
+            act_data = self._request("activity-api/rest/activities", act_params)
             if act_data and isinstance(act_data, list):
                 activities = act_data
         except Exception as e:

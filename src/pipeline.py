@@ -79,16 +79,14 @@ def run_pipeline(reference_date: Optional[date] = None) -> bool:
     # 4. Deterministic Analytics: Exercise Progression & Stall Detection
     logger.info("Step 4/6: Computing Exercise Progression & Stall Matrix...")
     progressions = []
-    for ex_id in split_state.today_target_template.exercise_ids:
+    target_tpl = split_state.today_target_template
+    num_exercises = max(len(target_tpl.exercise_ids), len(target_tpl.exercise_names))
+    for i in range(num_exercises):
+        ex_id = target_tpl.exercise_ids[i] if i < len(target_tpl.exercise_ids) else f"ex_{i+1}"
+        ex_name = target_tpl.exercise_names[i] if i < len(target_tpl.exercise_names) else ex_id
         sessions = caliber_data.recent_exercise_sessions.get(ex_id, [])
-        # Find exercise name
-        ex_name = ex_id
-        if sessions:
+        if sessions and sessions[0].exercise_name:
             ex_name = sessions[0].exercise_name
-        elif split_state.today_target_template.exercise_names:
-            idx = split_state.today_target_template.exercise_ids.index(ex_id)
-            if idx < len(split_state.today_target_template.exercise_names):
-                ex_name = split_state.today_target_template.exercise_names[idx]
 
         metrics = compute_exercise_progression(
             exercise_id=ex_id,

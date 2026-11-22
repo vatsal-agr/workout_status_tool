@@ -64,6 +64,14 @@ def _extract_dict(raw: Any) -> Optional[Dict[str, Any]]:
 
 def _parse_text_workout_fallback(text: str) -> List[LoggedWorkout]:
     """If MCP returns natural language / markdown for workouts, extract structured workout entries."""
+    if not text or not isinstance(text, str):
+        return []
+    # Guard against parsing error messages, Java/Kotlin exceptions, or stack traces as workouts
+    lower = text.lower()
+    if any(k in lower for k in ("exception", "parameter specified as non-null is null", "traceback", "internal server error")):
+        logger.warning("Ignoring error output in text workout parser: %s", text[:200])
+        return []
+
     workouts = []
     lines = text.splitlines()
     for line in lines:
@@ -71,7 +79,7 @@ def _parse_text_workout_fallback(text: str) -> List[LoggedWorkout]:
         if not line_clean:
             continue
         date_match = re.search(r"\b(202\d-\d{2}-\d{2})\b", line_clean)
-        if date_match or any(k in line_clean.lower() for k in ("workout", "completed", "session", "chest", "legs", "back", "push", "pull")):
+        if date_match or any(k in line_clean.lower() for k in ("completed", "session", "push", "pull", "legs", "shoulder")):
             workout_date = datetime.strptime(date_match.group(1), "%Y-%m-%d") if date_match else datetime.now()
             name_part = line_clean.split(":")[0] if ":" in line_clean else line_clean
             workouts.append(
@@ -84,6 +92,54 @@ def _parse_text_workout_fallback(text: str) -> List[LoggedWorkout]:
                 )
             )
     return workouts
+
+
+def _parse_text_workout_plans_fallback(text: str) -> List[WorkoutPlanTemplate]:
+    """Extract workout templates if MCP returns markdown or structured text."""
+    if not text or not isinstance(text, str):
+        return []
+    lower = text.lower()
+    if any(k in lower for k in ("exception", "parameter specified as non-null is null", "traceback", "error")):
+        return []
+
+    plans: List[WorkoutPlanTemplate] = []
+    current_plan_name = None
+    current_exercises: List[str] = []
+
+    for line in text.splitlines():
+        line_clean = line.strip()
+        if not line_clean:
+            continue
+        if line_clean.startswith("#") or line_clean.lower().startswith("plan:") or line_clean.lower().startswith("workout:"):
+            if current_plan_name and current_exercises:
+                plans.append(
+                    WorkoutPlanTemplate(
+                        template_id=current_plan_name.lower().replace(" ", "_"),
+                        name=current_plan_name,
+                        order_index=len(plans),
+                        exercise_ids=[f"ex_{len(plans)+1}_{i+1}" for i in range(len(current_exercises))],
+                        exercise_names=list(current_exercises),
+                    )
+                )
+            header_clean = line_clean.lstrip("#: ").replace("Plan:", "").replace("Workout:", "").strip()
+            current_plan_name = header_clean
+            current_exercises = []
+        elif current_plan_name and (line_clean.startswith("- ") or line_clean.startswith("* ") or re.match(r"^\d+\.", line_clean)):
+            ex_name = re.sub(r"^[-*\d.]+\s*", "", line_clean).strip()
+            if ex_name:
+                current_exercises.append(ex_name)
+
+    if current_plan_name and current_exercises:
+        plans.append(
+            WorkoutPlanTemplate(
+                template_id=current_plan_name.lower().replace(" ", "_"),
+                name=current_plan_name,
+                order_index=len(plans),
+                exercise_ids=[f"ex_{len(plans)+1}_{i+1}" for i in range(len(current_exercises))],
+                exercise_names=list(current_exercises),
+            )
+        )
+    return plans
 
 
 class CaliberMCPClient:
@@ -102,6 +158,7 @@ class CaliberMCPClient:
         self.client_id = client_id or settings.CALIBER_CLIENT_ID
         self.access_token: Optional[str] = None
         self.new_refresh_token: Optional[str] = None
+        self.tool_schemas: Dict[str, Dict[str, Any]] = {}
 
         self._msg_counter = 0
         self._initialized = False
@@ -180,8 +237,11 @@ class CaliberMCPClient:
             }
             tools_res = self._send_rpc(tools_payload)
             tools = tools_res.get("result", {}).get("tools", [])
-            tool_names = [t.get("name") for t in tools]
-            logger.info("Caliber MCP available tools: %s", tool_names)
+            for t in tools:
+                tname = t.get("name")
+                if tname:
+                    self.tool_schemas[tname] = t.get("inputSchema", {})
+                    logger.info("Caliber MCP tool '%s' schema: %s", tname, json.dumps(t.get("inputSchema", {})))
         except Exception as e:
             logger.warning("Could not query tools/list: %s", e)
 
@@ -256,6 +316,14 @@ class CaliberMCPClient:
             if first_item.get("type") == "text":
                 text_content = first_item.get("text", "")
                 logger.info("Tool '%s' raw output preview: %s", tool_name, text_content[:250])
+                if (
+                    tool_result.get("isError")
+                    or "Parameter specified as non-null is null" in text_content
+                    or text_content.strip().startswith("java.lang.")
+                ):
+                    logger.error("Caliber MCP tool '%s' returned backend error: %s", tool_name, text_content)
+                    raise RuntimeError(f"Caliber tool '{tool_name}' failed with server error: {text_content}")
+
                 try:
                     return json.loads(text_content)
                 except json.JSONDecodeError:
@@ -265,28 +333,99 @@ class CaliberMCPClient:
         logger.info("Tool '%s' returned: %s", tool_name, str(res_data)[:250])
         return res_data
 
+    def _build_tool_args(self, tool_name: str, preferred_args: Dict[str, Any]) -> Dict[str, Any]:
+        """Align arguments to tool's inputSchema properties and required fields."""
+        schema = self.tool_schemas.get(tool_name, {})
+        props = schema.get("properties", {})
+        required = schema.get("required", [])
+
+        if not props:
+            return preferred_args
+
+        out_args: Dict[str, Any] = {}
+        for k, v in preferred_args.items():
+            if k in props:
+                out_args[k] = v
+            elif k == "startDate":
+                for alt in ("start", "fromDate", "from", "start_date"):
+                    if alt in props:
+                        out_args[alt] = v
+                        break
+            elif k == "endDate":
+                for alt in ("end", "toDate", "to", "end_date"):
+                    if alt in props:
+                        out_args[alt] = v
+                        break
+
+        # Check required fields
+        for req in required:
+            if req not in out_args:
+                if "start" in req.lower() and "startDate" in preferred_args:
+                    out_args[req] = preferred_args["startDate"]
+                elif "end" in req.lower() and "endDate" in preferred_args:
+                    out_args[req] = preferred_args["endDate"]
+                elif req in ("limit", "count", "pageSize"):
+                    out_args[req] = 50
+                elif req in ("offset", "skip"):
+                    out_args[req] = 0
+                elif req in ("unit", "units"):
+                    out_args[req] = "kg"
+                elif req in ("timezone", "timeZone"):
+                    out_args[req] = "UTC"
+
+        return out_args
+
     def get_workout_plans(self) -> List[WorkoutPlanTemplate]:
         """Fetch active workout plan template sequence."""
-        raw = self._call_tool("getWorkoutPlans")
+        raw = None
+        try:
+            raw = self._call_tool("getWorkoutPlans")
+        except Exception as e:
+            logger.warning("getWorkoutPlans tool call failed: %s", e)
+            return []
+
         templates_data = _extract_list(raw, "templates")
         templates = []
-        for t in templates_data:
+        for idx, t in enumerate(templates_data):
             if isinstance(t, dict):
-                templates.append(WorkoutPlanTemplate.model_validate(t))
+                try:
+                    tpl = WorkoutPlanTemplate.model_validate(t)
+                    if tpl.order_index == 0 and idx > 0:
+                        tpl.order_index = idx
+                    templates.append(tpl)
+                except Exception as e:
+                    logger.warning("Could not validate template dict: %s", e)
+
+        if not templates and isinstance(raw, str) and raw.strip():
+            logger.info("getWorkoutPlans returned text. Attempting markdown parsing...")
+            templates = _parse_text_workout_plans_fallback(raw)
+
         return templates
 
     def get_workouts(self, start_date: date, end_date: date) -> List[LoggedWorkout]:
-        """Fetch completed workouts within the specified date window."""
-        # Include timezone padding (+1 day) to ensure evening workouts are captured
-        raw = self._call_tool(
-            "getWorkouts",
-            {
-                "startDate": start_date.isoformat(),
-                "endDate": (end_date + timedelta(days=1)).isoformat(),
-            },
-        )
-        workouts_data = _extract_list(raw, "workouts")
+        """Fetch completed workouts within the specified date window with fallbacks."""
+        pref_args = {
+            "startDate": start_date.isoformat(),
+            "endDate": (end_date + timedelta(days=1)).isoformat(),
+        }
+        args = self._build_tool_args("getWorkouts", pref_args)
 
+        raw = None
+        try:
+            raw = self._call_tool("getWorkouts", args)
+        except Exception as e:
+            logger.warning("Primary getWorkouts failed with args %s: %s. Retrying with empty arguments...", args, e)
+            try:
+                raw = self._call_tool("getWorkouts", {})
+            except Exception as e2:
+                logger.warning("Fallback getWorkouts({}) failed: %s. Retrying with limit only...", e2)
+                try:
+                    raw = self._call_tool("getWorkouts", {"limit": 50})
+                except Exception as e3:
+                    logger.error("All getWorkouts attempts failed: %s", e3)
+                    raw = None
+
+        workouts_data = _extract_list(raw, "workouts")
         workouts: List[LoggedWorkout] = []
         if workouts_data:
             for w in workouts_data:
