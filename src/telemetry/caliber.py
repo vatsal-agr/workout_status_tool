@@ -346,13 +346,13 @@ class CaliberMCPClient:
         for k, v in preferred_args.items():
             if k in props:
                 out_args[k] = v
-            elif k == "startDate":
-                for alt in ("start", "fromDate", "from", "start_date"):
+            elif k in ("from", "startDate"):
+                for alt in ("from", "startDate", "start", "fromDate", "start_date"):
                     if alt in props:
                         out_args[alt] = v
                         break
-            elif k == "endDate":
-                for alt in ("end", "toDate", "to", "end_date"):
+            elif k in ("to", "endDate"):
+                for alt in ("to", "endDate", "end", "toDate", "end_date"):
                     if alt in props:
                         out_args[alt] = v
                         break
@@ -360,10 +360,14 @@ class CaliberMCPClient:
         # Check required fields
         for req in required:
             if req not in out_args:
-                if "start" in req.lower() and "startDate" in preferred_args:
-                    out_args[req] = preferred_args["startDate"]
-                elif "end" in req.lower() and "endDate" in preferred_args:
-                    out_args[req] = preferred_args["endDate"]
+                if req == "from":
+                    out_args["from"] = preferred_args.get("from") or preferred_args.get("startDate")
+                elif req == "to":
+                    out_args["to"] = preferred_args.get("to") or preferred_args.get("endDate")
+                elif "start" in req.lower():
+                    out_args[req] = preferred_args.get("startDate") or preferred_args.get("from")
+                elif "end" in req.lower():
+                    out_args[req] = preferred_args.get("endDate") or preferred_args.get("to")
                 elif req in ("limit", "count", "pageSize"):
                     out_args[req] = 50
                 elif req in ("offset", "skip"):
@@ -384,18 +388,37 @@ class CaliberMCPClient:
             logger.warning("getWorkoutPlans tool call failed: %s", e)
             return []
 
-        templates_data = _extract_list(raw, "templates")
         templates = []
-        for idx, t in enumerate(templates_data):
-            if isinstance(t, dict):
-                try:
-                    tpl = WorkoutPlanTemplate.model_validate(t)
-                    if tpl.order_index == 0 and idx > 0:
-                        tpl.order_index = idx
-                    templates.append(tpl)
-                except Exception as e:
-                    logger.warning("Could not validate template dict: %s", e)
+        # Case 1: Caliber nested plans format: {"plans": [{"workouts": [...]}]}
+        if isinstance(raw, dict) and "plans" in raw and isinstance(raw["plans"], list):
+            for plan in raw["plans"]:
+                if isinstance(plan, dict):
+                    workouts = plan.get("workouts", [])
+                    if isinstance(workouts, list):
+                        for idx, w in enumerate(workouts):
+                            if isinstance(w, dict):
+                                try:
+                                    tpl = WorkoutPlanTemplate.model_validate(w)
+                                    if tpl.order_index == 0 and idx > 0:
+                                        tpl.order_index = idx
+                                    templates.append(tpl)
+                                except Exception as e:
+                                    logger.warning("Could not validate nested workout template: %s", e)
 
+        # Case 2: Direct list or {"templates": [...]}
+        if not templates:
+            templates_data = _extract_list(raw, "templates")
+            for idx, t in enumerate(templates_data):
+                if isinstance(t, dict):
+                    try:
+                        tpl = WorkoutPlanTemplate.model_validate(t)
+                        if tpl.order_index == 0 and idx > 0:
+                            tpl.order_index = idx
+                        templates.append(tpl)
+                    except Exception as e:
+                        logger.warning("Could not validate template dict: %s", e)
+
+        # Case 3: Text/Markdown fallback
         if not templates and isinstance(raw, str) and raw.strip():
             logger.info("getWorkoutPlans returned text. Attempting markdown parsing...")
             templates = _parse_text_workout_plans_fallback(raw)
@@ -405,8 +428,8 @@ class CaliberMCPClient:
     def get_workouts(self, start_date: date, end_date: date) -> List[LoggedWorkout]:
         """Fetch completed workouts within the specified date window with fallbacks."""
         pref_args = {
-            "startDate": start_date.isoformat(),
-            "endDate": (end_date + timedelta(days=1)).isoformat(),
+            "from": start_date.isoformat(),
+            "to": (end_date + timedelta(days=1)).isoformat(),
         }
         args = self._build_tool_args("getWorkouts", pref_args)
 
@@ -414,22 +437,17 @@ class CaliberMCPClient:
         try:
             raw = self._call_tool("getWorkouts", args)
         except Exception as e:
-            logger.warning("Primary getWorkouts failed with args %s: %s. Retrying with empty arguments...", args, e)
-            try:
-                raw = self._call_tool("getWorkouts", {})
-            except Exception as e2:
-                logger.warning("Fallback getWorkouts({}) failed: %s. Retrying with limit only...", e2)
-                try:
-                    raw = self._call_tool("getWorkouts", {"limit": 50})
-                except Exception as e3:
-                    logger.error("All getWorkouts attempts failed: %s", e3)
-                    raw = None
+            logger.warning("Primary getWorkouts failed with args %s: %s", args, e)
+            return []
 
         workouts_data = _extract_list(raw, "workouts")
         workouts: List[LoggedWorkout] = []
         if workouts_data:
             for w in workouts_data:
                 if isinstance(w, dict):
+                    status = str(w.get("status", "")).upper()
+                    if status and status not in ("COMPLETED", "DONE", "FINISHED"):
+                        continue
                     try:
                         workouts.append(LoggedWorkout.model_validate(w))
                     except Exception as e:
@@ -441,13 +459,23 @@ class CaliberMCPClient:
         return workouts
 
     def get_exercise_sessions(
-        self, exercise_id: str, limit: int = 3
+        self, exercise_id: str, start_date: Optional[date] = None, end_date: Optional[date] = None
     ) -> List[ExerciseSession]:
-        """Fetch historical sessions for a specific exercise ID."""
-        raw = self._call_tool(
-            "getExerciseSessions",
-            {"exerciseId": exercise_id, "limit": limit},
-        )
+        """Fetch historical sessions for a specific exercise UUID."""
+        t_to = end_date or date.today()
+        t_from = start_date or (t_to - timedelta(days=60))
+        pref_args = {
+            "exerciseId": str(exercise_id),
+            "from": t_from.isoformat(),
+            "to": (t_to + timedelta(days=1)).isoformat(),
+        }
+        args = self._build_tool_args("getExerciseSessions", pref_args)
+        try:
+            raw = self._call_tool("getExerciseSessions", args)
+        except Exception as e:
+            logger.warning("getExerciseSessions failed for %s with args %s: %s", exercise_id, args, e)
+            return []
+
         sessions_data = _extract_list(raw, "sessions")
         sessions = []
         for s in sessions_data:
@@ -460,13 +488,17 @@ class CaliberMCPClient:
 
     def get_nutrition(self, start_date: date, end_date: date) -> List[NutritionSummary]:
         """Fetch daily nutrition summaries."""
-        raw = self._call_tool(
-            "getNutrition",
-            {
-                "startDate": start_date.isoformat(),
-                "endDate": (end_date + timedelta(days=1)).isoformat(),
-            },
-        )
+        pref_args = {
+            "from": start_date.isoformat(),
+            "to": (end_date + timedelta(days=1)).isoformat(),
+        }
+        args = self._build_tool_args("getNutrition", pref_args)
+        try:
+            raw = self._call_tool("getNutrition", args)
+        except Exception as e:
+            logger.warning("getNutrition tool call failed: %s", e)
+            return []
+
         nutrition_data = _extract_list(raw, "logs")
         logs = []
         for n in nutrition_data:
@@ -479,24 +511,29 @@ class CaliberMCPClient:
 
     def get_nutrition_targets(self) -> Optional[NutritionTargets]:
         """Fetch daily macro targets."""
-        raw = self._call_tool("getNutritionTargets")
-        data = _extract_dict(raw)
-        if not data:
-            return None
         try:
+            raw = self._call_tool("getNutritionTargets")
+            data = _extract_dict(raw)
+            if not data:
+                return None
             return NutritionTargets.model_validate(data)
-        except Exception:
+        except Exception as e:
+            logger.warning("getNutritionTargets tool call failed: %s", e)
             return None
 
     def get_steps(self, start_date: date, end_date: date) -> List[DailySteps]:
         """Fetch daily step counts."""
-        raw = self._call_tool(
-            "getSteps",
-            {
-                "startDate": start_date.isoformat(),
-                "endDate": (end_date + timedelta(days=1)).isoformat(),
-            },
-        )
+        pref_args = {
+            "from": start_date.isoformat(),
+            "to": (end_date + timedelta(days=1)).isoformat(),
+        }
+        args = self._build_tool_args("getSteps", pref_args)
+        try:
+            raw = self._call_tool("getSteps", args)
+        except Exception as e:
+            logger.warning("getSteps tool call failed: %s", e)
+            return []
+
         steps_data = _extract_list(raw, "steps")
         steps = []
         for s in steps_data:
@@ -509,13 +546,17 @@ class CaliberMCPClient:
 
     def get_body_stats(self, start_date: date, end_date: date) -> List[BodyStat]:
         """Fetch daily body stats."""
-        raw = self._call_tool(
-            "getBodyStats",
-            {
-                "startDate": start_date.isoformat(),
-                "endDate": (end_date + timedelta(days=1)).isoformat(),
-            },
-        )
+        pref_args = {
+            "from": start_date.isoformat(),
+            "to": (end_date + timedelta(days=1)).isoformat(),
+        }
+        args = self._build_tool_args("getBodyStats", pref_args)
+        try:
+            raw = self._call_tool("getBodyStats", args)
+        except Exception as e:
+            logger.warning("getBodyStats tool call failed: %s", e)
+            return []
+
         stats_data = _extract_list(raw, "stats")
         stats = []
         for b in stats_data:
@@ -539,14 +580,23 @@ class CaliberMCPClient:
         steps_7d = self.get_steps(start_date=start_7d, end_date=ref_date)
         body_stats_7d = self.get_body_stats(start_date=start_7d, end_date=ref_date)
 
-        # Pull historical sessions for exercises present in the active templates
+        # Pull historical sessions for exercises present in the active templates or recent workouts
         recent_sessions: Dict[str, List[ExerciseSession]] = {}
         distinct_exercise_ids = {
             ex_id for t in templates for ex_id in t.exercise_ids if ex_id
         }
+        for w in workouts_14d:
+            for ex in w.exercises:
+                if ex.exercise_id:
+                    distinct_exercise_ids.add(ex.exercise_id)
+
         for ex_id in distinct_exercise_ids:
             try:
-                recent_sessions[ex_id] = self.get_exercise_sessions(ex_id, limit=3)
+                recent_sessions[ex_id] = self.get_exercise_sessions(
+                    exercise_id=ex_id,
+                    start_date=ref_date - timedelta(days=60),
+                    end_date=ref_date,
+                )
             except Exception as e:
                 logger.warning("Could not fetch sessions for exercise %s: %s", ex_id, e)
                 recent_sessions[ex_id] = []

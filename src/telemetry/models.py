@@ -106,7 +106,15 @@ class WorkoutPlanTemplate(BaseModel):
         if not isinstance(data, dict):
             return data
         d = dict(data)
-        tid = d.get("templateId") or d.get("template_id") or d.get("id") or d.get("planId") or d.get("workoutPlanId") or d.get("plan_id")
+        tid = (
+            d.get("workoutId")
+            or d.get("templateId")
+            or d.get("template_id")
+            or d.get("id")
+            or d.get("planId")
+            or d.get("workoutPlanId")
+            or d.get("plan_id")
+        )
         tname = d.get("name") or d.get("title") or d.get("planName") or d.get("workoutName") or "Plan"
         d["templateId"] = str(tid or tname.lower().replace(" ", "_"))
         d["name"] = str(tname)
@@ -151,10 +159,36 @@ class LoggedWorkout(BaseModel):
         if not isinstance(data, dict):
             return data
         d = dict(data)
-        wid = d.get("workoutId") or d.get("workout_id") or d.get("id") or f"workout_{datetime.now().timestamp()}"
-        tid = d.get("templateId") or d.get("template_id") or d.get("planId") or d.get("workoutPlanId") or d.get("plan_id")
-        wname = d.get("name") or d.get("title") or d.get("workoutName") or "Completed Workout"
-        date_raw = d.get("completedAt") or d.get("completed_at") or d.get("date") or d.get("completedDate") or d.get("timestamp") or datetime.now()
+        wid = (
+            d.get("calendarItemId")
+            or d.get("workoutId")
+            or d.get("workout_id")
+            or d.get("id")
+            or f"workout_{datetime.now().timestamp()}"
+        )
+        tid = (
+            d.get("templateId")
+            or d.get("template_id")
+            or d.get("workoutId")
+            or d.get("planId")
+            or d.get("workoutPlanId")
+            or d.get("plan_id")
+        )
+        wname = (
+            d.get("workoutTitle")
+            or d.get("name")
+            or d.get("title")
+            or d.get("workoutName")
+            or "Completed Workout"
+        )
+        date_raw = (
+            d.get("date")
+            or d.get("completedAt")
+            or d.get("completed_at")
+            or d.get("completedDate")
+            or d.get("timestamp")
+            or datetime.now()
+        )
 
         d["workoutId"] = str(wid)
         d["templateId"] = str(tid) if tid else None
