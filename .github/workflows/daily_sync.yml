@@ -3,7 +3,7 @@ name: Daily Telemetry & Coaching Sync
 on:
   schedule:
     # 05:15 UTC = 10:45 AM IST (Daily)
-    - cron: '15 5 * * *'
+    - cron: '19 5 * * *'
   workflow_dispatch:
 
 permissions:
